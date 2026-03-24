@@ -4,7 +4,7 @@
 
 ## 核心特色 (Features)
 
-* **完全本地運算 (Privacy First):** 程式碼差異 (Git Diff) 絕對不會離開你的電腦，完美解決企業商業機密外洩的疑慮。
+* **完全本地運算 (Privacy First):** 程式碼差異 (Git Diff) 解決機密外洩的疑慮。
 * **無縫整合 (Seamless Integration):** 綁定 Git 底層的 `prepare-commit-msg` Hook，開發者只需輸入習慣的 `git commit`，不需改變任何工作流程。
 * **標準化輸出 (Standardized):** 強制 AI 遵守 Conventional Commits 規範 (如 feat, fix, refactor 等)，保持專案歷史紀錄的整潔與易讀性。
 * **推論:** 採用開源的專門程式碼模型 `qwen2.5-coder:7b`，在本地端取得速度與精準度的最佳平衡。
