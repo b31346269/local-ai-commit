@@ -27,8 +27,9 @@
 * 安裝 [Ollama](https://ollama.com/)
 
 ### 1. 下載本地 AI 模型
+```markdown
+下載完成後輸入 /bye 退出對話模式，請保持 Ollama 軟體在背景執行
+[![AI Commit Demo 影片示範](assets/demo-thumbnail.png)](https://drive.google.com/file/d/1VsSo3RzOd8mr2ZZQl_GIDnm2lLQWrKzY/view?usp=drive_link)
 請開啟終端機，執行以下指令下載輕量級程式碼模型：
 ```bash
 ollama run qwen2.5-coder:7b
-下載完成後輸入 /bye 退出對話模式，請保持 Ollama 軟體在背景執行
-[![AI Commit Demo 影片示範](assets/demo-thumbnail.png)](https://drive.google.com/file/d/1VsSo3RzOd8mr2ZZQl_GIDnm2lLQWrKzY/view?usp=drive_link)
