@@ -33,5 +33,5 @@
 ollama run qwen2.5-coder:7b
 ```
 下載完成後輸入 /bye 退出對話模式，請保持 Ollama 軟體在背景執行
-[![AI Commit Demo 影片示範](assets/demo-thumbnail.png)](https://drive.google.com/file/d/1VsSo3RzOd8mr2ZZQl_GlDNm2l1QWrKzY/view?usp=drive_link)
+[![AI Commit Demo 影片示範](assets/demo-thumbnail.png)](https://drive.google.com/file/d/1VsSo3RzOd8mr2ZZQl_GIDnm2lLQWrKzY/view?usp=sharing)
 
