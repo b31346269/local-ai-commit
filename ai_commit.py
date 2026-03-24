@@ -42,7 +42,12 @@ def generate_commit_message(diff_text):
         response = requests.post(OLLAMA_API_URL, json=payload)
         response.raise_for_status()
         result = response.json()
-        return result.get("response", "").strip()
+        
+        raw_text = result.get("response", "").strip()
+        # 強制拔除 markdown 標籤
+        clean_text = raw_text.replace("```markdown", "").replace("```", "").strip()
+        
+        return clean_text
     except requests.exceptions.RequestException as e:
         print(f"\n❌ 無法連線到本地 Ollama 服務，請確認 Ollama 是否已啟動。錯誤: {e}")
         return None
@@ -58,7 +63,7 @@ if __name__ == "__main__":
     if not diff:
         sys.exit(0)
 
-    print(f"🤖 本地模型 ({MODEL_NAME}) 正在推論中，請稍候...")
+    print(f" 本地模型 ({MODEL_NAME}) 正在推論中，請稍候...")
     ai_msg = generate_commit_message(diff)
 
     if ai_msg:
