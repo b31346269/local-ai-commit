@@ -8,8 +8,8 @@ OLLAMA_API_URL = "http://localhost:11434/api/generate"
 MODEL_NAME = "qwen2.5-coder:7b"
 
 def get_git_diff():
-    # 取得 staged 的程式碼差異
-    result = subprocess.run(['git', 'diff', '--cached'], capture_output=True, text=True)
+    # 取得 staged 的程式碼差異，並明確指定使用 utf-8 解碼
+    result = subprocess.run(['git', 'diff', '--cached'], capture_output=True, text=True, encoding='utf-8')
     return result.stdout
 
 def generate_commit_message(diff_text):
