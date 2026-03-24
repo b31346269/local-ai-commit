@@ -2,318 +2,667 @@ import pandas as pd
 import numpy as np
 import os
 import glob
-from colorama import init, Fore, Style
-import twstock
+import warnings
+import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 
+# 忽略 pandas 警告
+warnings.filterwarnings('ignore')
+
+# 設定中文字型
+plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei'] 
+plt.rcParams['axes.unicode_minus'] = False
+
 # ==========================================
-# 1. 參數設定 (嚴格參照 test.py CONFIG)
+# 1. 策略參數設定 (完全對齊 test.py)
 # ==========================================
+CONFIG = {
+    # 時間設定 (從 2022/9 開始)
+    'START_DATE': '2015/6/5',
 
-# 路徑設定
-CHIP_FOLDER = r'C:\Users\b3134\Desktop\stock_chip_data\stock_chip_data'
-PRICE_FOLDER = r'C:\Users\b3134\Desktop\stock_chip_data\daily_price_data'
-RESULT_FILE = 'weekly_buy_candidates_v3.csv' # 輸出檔名
-
-# --- 大盤熔斷機制 ---
-BENCHMARK_FILE = '0000.csv'
-CRASH_DROP_THRESHOLD = 0.04   # 單日跌幅 > 4%
-CRASH_CHILL_DAYS = 35         # 冷靜期 35 天
-
-# --- 基礎濾網 ---
-MIN_PRICE = 10.0
-MIN_WEEKLY_VOL = 5000          # 修正：依照 test.py 改為 5000 張
-ABNORMAL_JUMP_THRESHOLD = 20.0 # 排除單週暴增 > 20%
-VOL_MOMENTUM_RATIO = 1.2       # 修正：本週量需大於上週量 1.2 倍
-
-# --- 三級距策略參數 (Tiered Strategy) ---
-# Tier 1: 小型股 (< 1500億)
-T1_CAP_LIMIT = 1500.0 
-T1_1W_TH = 3.0    # 單周 3%
-T1_2W_TH = 5.0    # 雙周 5%
-T1_WEIGHT = 2.0   # 權重
-
-# Tier 2: 中型股 (1500億 ~ 4000億)
-T2_CAP_LIMIT = 4000.0
-T2_1W_TH = 1.7    # 單周 1.7%
-T2_2W_TH = 3.0    # 雙周 3%
-T2_WEIGHT = 1.0   # 權重
-
-# Tier 3: 大型股 (> 4000億)
-T3_1W_TH = 0.2    # 單周 0.2%
-T3_2W_TH = 0.5    # 雙周 0.5%
-T3_WEIGHT = 1.3   # 權重
-
-init(autoreset=True)
-
-# ================= 輔助函式 =================
-def get_stock_name(stock_id):
-    """取得股票中文名稱"""
-    try:
-        if stock_id in twstock.codes:
-            return twstock.codes[stock_id].name
-    except:
-        pass
-    return stock_id
-
-def calculate_ma(series, window):
-    return series.rolling(window=window).mean()
-
-def is_market_crashing():
-    """檢查大盤是否熔斷"""
-    try:
-        bm_path = os.path.join(PRICE_FOLDER, BENCHMARK_FILE)
-        if not os.path.exists(bm_path):
-            print(f"{Fore.YELLOW}⚠️ 警告：找不到大盤資料 {BENCHMARK_FILE}，跳過熔斷檢查。")
-            return False
-            
-        df_bm = pd.read_csv(bm_path)
-        df_bm['Date'] = pd.to_datetime(df_bm['Date'])
-        df_bm = df_bm.sort_values('Date')
-        
-        # 計算前日收盤以計算跌幅
-        df_bm['Prev_Close'] = df_bm['Close'].shift(1)
-        df_bm['Drop_Rate'] = (df_bm['Prev_Close'] - df_bm['Close']) / df_bm['Prev_Close']
-        
-        # 找出崩跌日
-        crash_days = df_bm[df_bm['Drop_Rate'] >= CRASH_DROP_THRESHOLD]
-        
-        if crash_days.empty:
-            return False
-            
-        last_crash_date = crash_days.iloc[-1]['Date']
-        last_data_date = df_bm.iloc[-1]['Date']
-        
-        days_since_crash = (last_data_date - last_crash_date).days
-        
-        if days_since_crash < CRASH_CHILL_DAYS:
-            print(f"{Fore.RED}⛔ 市場處於熔斷冷靜期！(距上次大跌僅 {days_since_crash} 天)")
-            return True
-            
-        return False
-        
-    except Exception as e:
-        print(f"{Fore.RED}❌ 熔斷檢查發生錯誤: {e}")
-        return False
-
-# ================= 主程式 =================
-def main():
-    print(f"{Fore.CYAN}🔍 開始掃描買進訊號 (V3 Tiered Strategy - 完全同步回測版)...")
+    # 資料路徑 (保留 test_strategy_pro 的路徑)
+    'DATA_DIR': r'C:\Users\b3134\Desktop\processed_data',
     
-    if is_market_crashing():
-        print(f"{Fore.RED}⛔ 系統依據策略暫停買進 (大盤熔斷中)。")
-        return
+    # 資金管理
+    'INITIAL_CAPITAL': 1_000_000, 
+    'MAX_POSITIONS': 15,          
+    'FEE_RATE': 0.001425,       
+    'TAX_RATE': 0.003,          
+    'SLIPPAGE': 0.003, 
 
-    candidates = []
+    # 基礎停損停利 (會被分級停損覆蓋)
+    'HARD_STOP_LOSS': 0.20,     
+    'TRAILING_STOP': 0.15,      
     
-    # 取得所有籌碼檔案
-    chip_files = glob.glob(os.path.join(CHIP_FOLDER, "*.csv"))
-    print(f"📂 找到 {len(chip_files)} 檔籌碼資料，開始分析...")
+    # 大盤熔斷
+    'BENCHMARK_DROP_THRESHOLD': 0.04, 
+    'CRASH_FREEZE_DAYS': 35,          
 
-    for i, file_path in enumerate(chip_files):
-        filename = os.path.basename(file_path)
-        stock_id = filename.split('.')[0]
+    # 進場濾網
+    'MIN_WEEKLY_VOL': 5000,           
+    'ABNORMAL_JUMP_THRESHOLD': 20.0, 
+
+    # --- Tiered Strategy (三級距) ---
+    # [Tier 1] < 1500億
+    'T1_CAP_LIMIT': 1500,
+    'T1_1W_TH': 3.0,    
+    'T1_2W_TH': 5.0,    
+    'T1_WEIGHT': 2.0,   
+    # [Tier 2] 1500~4000億
+    'T2_CAP_LIMIT': 4000,
+    'T2_1W_TH': 1.7,    
+    'T2_2W_TH': 3.0,    
+    'T2_WEIGHT': 1.0,   
+    # [Tier 3] > 4000億
+    'T3_1W_TH': 0.2,    
+    'T3_2W_TH': 0.5,    
+    'T3_WEIGHT': 1.3    
+}
+
+# ==========================================
+# 2. 資料處理 (適配 processed_data 格式)
+# ==========================================
+class DataHandler:
+    def __init__(self):
+        self.stock_data = {} # 暫存原始資料
+        self.price_data = {} # 符合 test.py 格式的價格資料
+        self.chip_data = {}  # 符合 test.py 格式的籌碼資料
+        self.benchmark_data = None
         
-        if i % 100 == 0:
-            print(f"\rProcessing... {i}/{len(chip_files)}", end="")
-
-        try:
-            # -------------------------------------------------------
-            # 1. 讀取與處理籌碼資料
-            # -------------------------------------------------------
-            df_chip = pd.read_csv(file_path)
+    def load_data(self):
+        print("正在讀取資料...")
+        
+        # 1. 讀取大盤
+        benchmark_path = os.path.join(CONFIG['DATA_DIR'], '0000.csv')
+        if not os.path.exists(benchmark_path):
+            print("錯誤：找不到大盤資料 0000.csv")
+            return
             
-            # 標準化欄位
-            if '資料日期' in df_chip.columns:
-                df_chip['Date'] = pd.to_datetime(df_chip['資料日期'].astype(str), format='%Y%m%d', errors='coerce')
-            elif 'Date' in df_chip.columns:
-                df_chip['Date'] = pd.to_datetime(df_chip['Date'], errors='coerce')
-            else:
-                continue
-
-            # 處理數值 (移除逗號轉 float)
-            for col in ['集保總張數', '>400張大股東持有百分比']:
-                if col in df_chip.columns and df_chip[col].dtype == object:
-                    df_chip[col] = df_chip[col].astype(str).str.replace(',', '').astype(float)
-            
-            df_chip = df_chip.dropna(subset=['Date']).sort_values('Date')
-            
-            if len(df_chip) < 3:
-                continue
-
-            # 取得最新一筆 (本週)、上一筆 (上週)、上上筆 (上上週)
-            # 注意：這裡假設資料是每週一筆。若為日更籌碼需自行 resampling，但通常集保是週更。
-            row_latest = df_chip.iloc[-1]
-            row_prev_1 = df_chip.iloc[-2]
-            row_prev_2 = df_chip.iloc[-3]
-            
-            report_date = row_latest['Date']
-            prev_date = row_prev_1['Date']
-
-            # -------------------------------------------------------
-            # 2. 讀取與處理股價資料 (計算 MA20 與成交量)
-            # -------------------------------------------------------
-            price_file = os.path.join(PRICE_FOLDER, f"{stock_id}.csv")
-            if not os.path.exists(price_file):
-                price_file = os.path.join(PRICE_FOLDER, f"{stock_id}.TW.csv")
-                if not os.path.exists(price_file):
-                    continue
-            
-            df_price = pd.read_csv(price_file)
-            df_price['Date'] = pd.to_datetime(df_price['Date'])
-            df_price = df_price.sort_values('Date')
-            
-            # 計算 MA20
-            df_price['MA20'] = df_price['Close'].rolling(window=20).mean()
-            
-            # 取得對應籌碼日期的股價資訊
-            # 這裡使用 asof 找最接近籌碼日期的股價 (通常是週五)
+        bench_df = pd.read_csv(benchmark_path, index_col='Date', parse_dates=True)
+        bench_df = bench_df.sort_index()
+        # 計算大盤跌幅 (用於熔斷)
+        bench_df['Prev_Close'] = bench_df['Close'].shift(1)
+        bench_df['Drop_Rate'] = (bench_df['Prev_Close'] - bench_df['Close']) / bench_df['Prev_Close']
+        self.benchmark_data = bench_df
+        
+        # 2. 讀取個股 (遍歷 processed_data)
+        all_files = glob.glob(os.path.join(CONFIG['DATA_DIR'], "*.csv"))
+        all_files = [f for f in all_files if "0000.csv" not in f]
+        
+        start_dt = pd.to_datetime(CONFIG['START_DATE'])
+        
+        for f in all_files:
+            stock_id = os.path.basename(f).replace('.csv', '')
             try:
-                price_idx = df_price[df_price['Date'] <= report_date].index[-1]
-                curr_price_row = df_price.loc[price_idx]
-            except IndexError:
-                continue # 找不到對應日期股價
-            
-            close_price = float(curr_price_row['Close'])
-            ma20 = float(curr_price_row['MA20'])
-            
-            # --- 濾網 A: 股價必須 > 10元 ---
-            if close_price < MIN_PRICE:
+                # 讀取合併後的檔案 (包含 Price 和 Chip)
+                df = pd.read_csv(f, index_col='Date', parse_dates=True)
+                df = df.sort_index()
+                
+                # 欄位檢查與對應
+                # 來源欄位: Open, High, Low, Close, Volume, Major_Hold_Pct, Total_Shares
+                if 'Major_Hold_Pct' not in df.columns: continue
+                
+                # --- 建構 Price Data (test.py 格式) ---
+                pdf = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+                # 計算 MA
+                pdf['MA5'] = pdf['Close'].rolling(window=5).mean()
+                pdf['MA20'] = pdf['Close'].rolling(window=20).mean()
+                
+                # 過濾日期
+                pdf = pdf[pdf.index >= start_dt - timedelta(days=60)]
+                self.price_data[stock_id] = pdf
+                
+                # --- 建構 Chip Data (test.py 格式) ---
+                cdf = df[['Major_Hold_Pct', 'Total_Shares']].copy()
+                # 欄位更名以符合 test.py 邏輯
+                cdf = cdf.rename(columns={
+                    'Major_Hold_Pct': '>400張大股東持有百分比',
+                    'Total_Shares': '集保總張數'
+                })
+                
+                # 過濾日期
+                cdf = cdf[cdf.index >= start_dt - timedelta(days=60)]
+                self.chip_data[stock_id] = cdf
+                    
+            except Exception as e:
+                # print(f"Load error {stock_id}: {e}")
                 continue
+                
+        print(f"成功載入 {len(self.price_data)} 檔股票。")
 
-            # --- 濾網 B: 股價必須在月線 (MA20) 之上 (test.py 邏輯) ---
-            if close_price <= ma20:
-                continue
-                
-            # --- 濾網 C: 成交量檢查 ---
-            # 計算本週總成交量 (籌碼日期往前推7天)
-            mask_this_week = (df_price['Date'] > (report_date - timedelta(days=7))) & (df_price['Date'] <= report_date)
-            vol_this_week = df_price.loc[mask_this_week, 'Volume'].sum()
+# ==========================================
+# 3. 回測引擎 (邏輯與 test.py 一致)
+# ==========================================
+class BacktestEngine:
+    def __init__(self, data_handler):
+        self.dh = data_handler
+        self.cash = CONFIG['INITIAL_CAPITAL']
+        self.positions = {} 
+        self.history = []
+        self.trade_records = [] 
+        
+        self.crash_protection_days = 0
+        self.order_queue = [] # 待執行訂單
+        
+        self.buy_stats = []
+        self.sell_stats = []
+
+    def get_price(self, stock_id, date):
+        if stock_id not in self.dh.price_data: return None
+        df = self.dh.price_data[stock_id]
+        idx = df.index.asof(date)
+        if pd.isna(idx): return None
+        if (date - idx).days > 5: return None
+        return df.loc[idx]
+
+    def get_weekly_volume(self, stock_id, end_date):
+        if stock_id not in self.dh.price_data: return 0
+        df = self.dh.price_data[stock_id]
+        start_date = end_date - timedelta(days=6)
+        mask = (df.index >= start_date) & (df.index <= end_date)
+        return df.loc[mask, 'Volume'].sum()
+
+    def execute_orders(self, date):
+        if not self.order_queue: return
+        
+        sell_orders = [o for o in self.order_queue if o['action'] == 'SELL']
+        buy_orders = [o for o in self.order_queue if o['action'] == 'BUY']
+        
+        # 1. 執行賣出
+        for order in sell_orders:
+            sid = order['stock_id']
+            row = self.get_price(sid, date)
+            if row is None: continue 
             
-            # 計算上週總成交量
-            mask_last_week = (df_price['Date'] > (prev_date - timedelta(days=7))) & (df_price['Date'] <= prev_date)
-            vol_last_week = df_price.loc[mask_last_week, 'Volume'].sum()
+            open_price = row['Open']
+            self._sell_stock(sid, open_price, date, order['reason'], order['signal_val'])
+        
+        # 2. 執行買入
+        if self.crash_protection_days > 0:
+            pass # 熔斷期間不買入
+        else:
+            # 依據 signal_val (分數) 排序：大到小
+            buy_orders.sort(key=lambda x: x['signal_val'], reverse=True)
             
-            # C-1: 週量門檻
-            if vol_this_week/1000 < MIN_WEEKLY_VOL:
-                continue
+            for order in buy_orders:
+                sid = order['stock_id']
+                row = self.get_price(sid, date)
+                if row is None: continue
                 
-            # C-2: 量能爆發 (本週 > 上週 * 1.2)
+                open_price = row['Open']
+                if sid in self.positions: continue
+                
+                stats_val = order.get('stats_val', 0)
+                self._buy_stock(sid, open_price, date, order['reason'], order['signal_val'], stats_val)
+            
+        self.order_queue = []
+
+    def _buy_stock(self, stock_id, price, date, reason, signal_val, stats_val=None):
+        if len(self.positions) >= CONFIG['MAX_POSITIONS']: return
+
+        equity = self.calculate_equity(date)
+        target_amt = equity / CONFIG['MAX_POSITIONS']
+        invest_amt = min(self.cash, target_amt)
+        
+        if invest_amt < 10000: return
+        
+        exec_price = price * (1 + CONFIG['SLIPPAGE']) 
+        cost_per_share = exec_price * (1 + CONFIG['FEE_RATE'])
+        shares = int(invest_amt // cost_per_share)
+        
+        if shares > 0:
+            total_cost = shares * cost_per_share
+            self.cash -= total_cost
+            
+            # --- 計算進場市值 ---
+            entry_mcap = 0
+            if stock_id in self.dh.chip_data:
+                cdf = self.dh.chip_data[stock_id]
+                idx = cdf.index.asof(date)
+                if not pd.isna(idx):
+                    total_sheets = cdf.loc[idx]['集保總張數']
+                    # 市值(億) = 股價 * 股本(張)*1000 / 1億
+                    entry_mcap = (exec_price * total_sheets * 1000) / 100_000_000
+
+            display_val = stats_val if stats_val is not None else signal_val
+            
+            self.positions[stock_id] = {
+                'shares': shares,
+                'cost_price': exec_price,
+                'max_price': exec_price,
+                'entry_date': date,
+                'buy_reason': f"{reason}({display_val:.1f}%)", 
+                'buy_signal': signal_val,
+                'entry_mcap': entry_mcap 
+            }
+            self.buy_stats.append(display_val)
+
+    def _sell_stock(self, stock_id, price, date, reason, signal_val):
+        if stock_id not in self.positions: return
+        
+        pos = self.positions[stock_id]
+        shares = pos['shares']
+        
+        exec_price = price * (1 - CONFIG['SLIPPAGE']) 
+        
+        revenue = shares * exec_price
+        fee = revenue * CONFIG['FEE_RATE']
+        tax = revenue * CONFIG['TAX_RATE']
+        net_payout = revenue - fee - tax
+        
+        self.cash += net_payout
+        
+        cost_per_share = pos['cost_price'] * (1 + CONFIG['FEE_RATE'])
+        initial_cost = shares * cost_per_share
+        profit_amt = net_payout - initial_cost
+        roi = profit_amt / initial_cost
+        
+        self.trade_records.append({
+            'Stock': stock_id,
+            'Market_Cap': round(pos.get('entry_mcap', 0), 1),
+            'Buy_Date': pos['entry_date'].strftime('%Y-%m-%d'),
+            'Buy_Price': pos['cost_price'],
+            'Buy_Reason': pos['buy_reason'],
+            'Sell_Date': date.strftime('%Y-%m-%d'),
+            'Sell_Price': exec_price,
+            'Sell_Reason': reason,
+            'Hold_Days': (date - pos['entry_date']).days,
+            'Return_Pct': roi,
+            'Profit_Amt': profit_amt,
+            'Sell_Signal_Val': signal_val
+        })
+        
+        if '籌碼' in reason:
+            self.sell_stats.append(signal_val)
+            
+        del self.positions[stock_id]
+
+    def calculate_equity(self, date):
+        equity = self.cash
+        for sid, pos in self.positions.items():
+            row = self.get_price(sid, date)
+            p = row['Close'] if row is not None else pos['max_price']
+            equity += pos['shares'] * p
+        return equity
+
+    def run(self):
+        start_dt = pd.to_datetime(CONFIG['START_DATE'])
+        # 使用大盤日期作為回測時間軸
+        all_dates = self.dh.benchmark_data.index.unique()
+        dates = sorted([d for d in all_dates if d >= start_dt])
+        
+        if not dates: return pd.DataFrame()
+        
+        print(f"開始回測 V3_Tiered_Strategy ({dates[0].date()} ~ {dates[-1].date()})...")
+        
+        for current_date in dates:
+            
+            # --- 1. 開盤階段 ---
+            self.execute_orders(current_date)
+            
+            # --- 2. 盤中/收盤檢查 ---
+            # 檢查大盤熔斷
+            if current_date in self.dh.benchmark_data.index:
+                bench_row = self.dh.benchmark_data.loc[current_date]
+                if bench_row['Drop_Rate'] >= CONFIG['BENCHMARK_DROP_THRESHOLD']:
+                    print(f"⚠️ {current_date.date()} 大盤崩跌 {bench_row['Drop_Rate']*100:.2f}%! 啟動熔斷保護 {CONFIG['CRASH_FREEZE_DAYS']} 天")
+                    self.crash_protection_days = CONFIG['CRASH_FREEZE_DAYS']
+
+            if self.crash_protection_days > 0:
+                self.crash_protection_days -= 1
+
+            # 持股停損停利
+            for sid, pos in self.positions.items():
+                row = self.get_price(sid, current_date)
+                if row is None: continue
+                
+                close_price = row['Close']
+                high_price = row['High']
+                
+                # 更新最高價
+                if high_price > pos['max_price']:
+                    self.positions[sid]['max_price'] = high_price
+                
+                loss_rate = (close_price - pos['cost_price']) / pos['cost_price']
+                
+                if any(o['stock_id'] == sid and o['action'] == 'SELL' for o in self.order_queue): continue
+
+                # 分級停損邏輯
+                entry_mcap = pos.get('entry_mcap', 0) 
+                current_stop = 0.15 
+
+                if entry_mcap < 1500:       # < 1500億
+                    current_stop = 0.20     
+                elif entry_mcap > 4000:     # > 4000億
+                    current_stop = 0.10     
+                else:
+                    current_stop = 0.15     
+
+                # 檢查硬性停損
+                if loss_rate <= -current_stop:
+                    self.order_queue.append({
+                        'stock_id': sid, 'action': 'SELL', 
+                        'reason': f'硬性停損({current_stop*100:.0f}%)',
+                        'signal_val': 0
+                    })
+                    continue
+                
+                # 檢查移動停利
+                drawdown = (close_price - pos['max_price']) / pos['max_price']
+                if drawdown <= -CONFIG['TRAILING_STOP']:
+                    self.order_queue.append({
+                        'stock_id': sid, 'action': 'SELL', 
+                        'reason': '移動停利', 'signal_val': 0
+                    })
+                    continue
+
+            # --- 3. 週末/策略掃描 ---
+            if current_date.weekday() == 4: # 週五
+                self.run_weekend_analysis(current_date)
+
+            # --- 紀錄權益 ---
+            eq = self.calculate_equity(current_date)
+            bm_close = self.dh.benchmark_data.loc[current_date]['Close']
+            
+            self.history.append({
+                'Date': current_date,
+                'Equity': eq,
+                'Benchmark': bm_close,
+                'Positions': len(self.positions),
+                'Is_Freezing': 1 if self.crash_protection_days > 0 else 0
+            })
+
+        return pd.DataFrame(self.history)
+
+    def run_weekend_analysis(self, report_date):
+        """每週五收盤後執行"""
+        
+        # 1. 籌碼賣訊檢查
+        for sid in list(self.positions.keys()):
+            if any(o['stock_id'] == sid and o['action'] == 'SELL' for o in self.order_queue): continue
+            
+            should_sell, drop_val = self.check_chip_sell_signal(sid, report_date)
+            if should_sell:
+                self.order_queue.append({
+                    'stock_id': sid, 'action': 'SELL',
+                    'reason': '籌碼鬆動且破5日', 'signal_val': drop_val
+                })
+
+        # 2. 買進掃描
+        candidates = self.scan_candidates(report_date)
+        for sid, score, raw_val in candidates:
+            if sid in self.positions: continue
+            if any(o['stock_id'] == sid and o['action'] == 'BUY' for o in self.order_queue): continue
+            
+            self.order_queue.append({
+                'stock_id': sid, 'action': 'BUY',
+                'reason': '週選', 
+                'signal_val': score,    
+                'stats_val': raw_val    
+            })
+
+    def scan_candidates(self, report_date):
+        candidates = [] 
+        for sid, chip_df in self.dh.chip_data.items():
+            idx = chip_df.index.asof(report_date)
+            if pd.isna(idx): continue
+            curr_chip = chip_df.loc[idx]
+            
+            if (report_date - idx).days > 7: continue 
+            
+            prev_idx = chip_df.index.asof(idx - timedelta(days=1))
+            if pd.isna(prev_idx): continue
+            prev_chip = chip_df.loc[prev_idx]
+            
+            prev2_idx = chip_df.index.asof(prev_idx - timedelta(days=1))
+            has_prev2 = not pd.isna(prev2_idx)
+            prev2_chip = chip_df.loc[prev2_idx] if has_prev2 else None
+
+            price_row = self.get_price(sid, report_date) 
+            if price_row is None: continue
+            
+            # 濾網：股價必須在 20MA (月線) 之上
+            if price_row['Close'] <= price_row['MA20']: continue 
+            
+            # 市值計算 (單位: 億)
+            market_cap = (price_row['Close'] * curr_chip['集保總張數']*1000) / 100000000
+            
+            # --- 成交量濾網 ---
+            vol_this_week = self.get_weekly_volume(sid, report_date)
+            if vol_this_week < CONFIG['MIN_WEEKLY_VOL']: continue 
+
+            vol_last_week = self.get_weekly_volume(sid, prev_idx)
             if vol_last_week == 0: continue
-            if vol_this_week <= vol_last_week * VOL_MOMENTUM_RATIO:
-                continue
+            if vol_this_week <= vol_last_week * 1.2: continue 
+                
+            # 籌碼計算
+            diff_1w = curr_chip['>400張大股東持有百分比'] - prev_chip['>400張大股東持有百分比']
+            if diff_1w > CONFIG['ABNORMAL_JUMP_THRESHOLD']: continue 
 
-            # -------------------------------------------------------
-            # 3. 籌碼邏輯運算
-            # -------------------------------------------------------
+            diff_2w = 0
+            if has_prev2:
+                diff_2w = curr_chip['>400張大股東持有百分比'] - prev2_chip['>400張大股東持有百分比']
             
-            # 市值計算 (億)
-            total_sheets = float(row_latest['集保總張數'])
-            market_cap = (close_price * total_sheets * 1000) / 100000000 # 注意單位換算：張->股(/1000)
-            
-            # 籌碼變動
-            share_latest = float(row_latest['>400張大股東持有百分比'])
-            share_prev_1 = float(row_prev_1['>400張大股東持有百分比'])
-            share_prev_2 = float(row_prev_2['>400張大股東持有百分比'])
-            
-            diff_1w = share_latest - share_prev_1
-            diff_2w = share_latest - share_prev_2
-            
-            # 異常暴衝檢查
-            if diff_1w > ABNORMAL_JUMP_THRESHOLD:
-                continue
-
-            # -------------------------------------------------------
-            # 4. 分級評分策略 (完全依照 test.py)
-            # -------------------------------------------------------
-            
+            # 三級距分層
             final_score = 0
-            tier = 0
-            raw_val = 0 # 紀錄是用 1W 還是 2W 進場的原始數值
-            trigger_msg = ""
+            raw_val = 0
             
-            # 設定門檻
             th_1w, th_2w, weight = 0, 0, 0
             
-            if market_cap < T1_CAP_LIMIT: # Tier 1
-                tier = 1
-                th_1w, th_2w, weight = T1_1W_TH, T1_2W_TH, T1_WEIGHT
-            elif market_cap < T2_CAP_LIMIT: # Tier 2
-                tier = 2
-                th_1w, th_2w, weight = T2_1W_TH, T2_2W_TH, T2_WEIGHT
-            else: # Tier 3
-                tier = 3
-                th_1w, th_2w, weight = T3_1W_TH, T3_2W_TH, T3_WEIGHT
+            if market_cap < CONFIG['T1_CAP_LIMIT']: # < 1500億
+                th_1w = CONFIG['T1_1W_TH']
+                th_2w = CONFIG['T1_2W_TH']
+                weight = CONFIG['T1_WEIGHT']
+                
+            elif market_cap < CONFIG['T2_CAP_LIMIT']: # 1500 ~ 4000億
+                th_1w = CONFIG['T2_1W_TH']
+                th_2w = CONFIG['T2_2W_TH']
+                weight = CONFIG['T2_WEIGHT']
+                
+            else: # > 4000億
+                th_1w = CONFIG['T3_1W_TH']
+                th_2w = CONFIG['T3_2W_TH']
+                weight = CONFIG['T3_WEIGHT']
 
-            # 計算分數： (Diff / Threshold) * Weight * 100
-            
-            # 檢查單週
             if diff_1w >= th_1w:
                 score_1w = (diff_1w / th_1w) * weight * 100
                 if score_1w > final_score:
                     final_score = score_1w
                     raw_val = diff_1w
-                    trigger_msg = f"T{tier}_1W({diff_1w:.2f}%)"
             
-            # 檢查雙週
-            if diff_2w >= th_2w:
+            if has_prev2 and diff_2w >= th_2w:
                 score_2w = (diff_2w / th_2w) * weight * 100
                 if score_2w > final_score:
                     final_score = score_2w
                     raw_val = diff_2w
-                    trigger_msg = f"T{tier}_2W({diff_2w:.2f}%)"
 
-            # -------------------------------------------------------
-            # 5. 加入候選名單
-            # -------------------------------------------------------
             if final_score > 0:
-                candidates.append({
-                    'Stock': stock_id,
-                    'Name': get_stock_name(stock_id),
-                    'Close': close_price,
-                    'Tier': tier,
-                    'Score': round(final_score, 2),
-                    'Chip_Diff_1W': round(diff_1w, 2),
-                    'Chip_Diff_2W': round(diff_2w, 2),
-                    'Trigger': trigger_msg,
-                    'MarketCap(E)': int(market_cap),
-                    'MA20': round(ma20, 2),
-                    'Vol_ThisW': int(vol_this_week/1000),
-                    'Vol_LastW': int(vol_last_week/1000)
-                })
+                candidates.append((sid, final_score, raw_val))
+                
+        return candidates
 
-        except Exception as e:
-            # print(f"Error processing {stock_id}: {e}")
-            continue
+    def check_chip_sell_signal(self, sid, report_date):
+        if sid not in self.dh.chip_data: return False, 0
+        chip_df = self.dh.chip_data[sid]
+        
+        idx = chip_df.index.asof(report_date)
+        if pd.isna(idx): return False, 0
+        curr_chip = chip_df.loc[idx]
+        if (report_date - idx).days > 7: return False, 0
+        
+        prev_idx = chip_df.index.asof(idx - timedelta(days=1))
+        if pd.isna(prev_idx): return False, 0
+        prev_chip = chip_df.loc[prev_idx]
+        
+        prev2_idx = chip_df.index.asof(prev_idx - timedelta(days=1))
+        has_prev2 = not pd.isna(prev2_idx)
+        prev2_chip = chip_df.loc[prev2_idx] if has_prev2 else None
+        
+        price_row = self.get_price(sid, report_date)
+        if price_row is None: return False, 0
+        
+        market_cap = (price_row['Close'] * curr_chip['集保總張數']*1000) / 100000000
+        
+        drop_1w = -(curr_chip['>400張大股東持有百分比'] - prev_chip['>400張大股東持有百分比'])
+        drop_2w = 0
+        if has_prev2:
+            drop_2w = -(curr_chip['>400張大股東持有百分比'] - prev2_chip['>400張大股東持有百分比'])
+            
+        limit_1w = 0
+        limit_2w = 0
+        
+        if market_cap < CONFIG['T1_CAP_LIMIT']:
+            limit_1w = CONFIG['T1_1W_TH']
+            limit_2w = CONFIG['T1_2W_TH']
+        elif market_cap < CONFIG['T2_CAP_LIMIT']:
+            limit_1w = CONFIG['T2_1W_TH']
+            limit_2w = CONFIG['T2_2W_TH']
+        else:
+            limit_1w = CONFIG['T3_1W_TH']
+            limit_2w = CONFIG['T3_2W_TH']
 
-    # -------------------------------------------------------
-    # 輸出結果
-    # -------------------------------------------------------
-    if candidates:
-        df_out = pd.DataFrame(candidates)
-        # 依照 Score 由高到低排序
-        df_out = df_out.sort_values('Score', ascending=False)
+        # MA5 護盾檢查
+        if price_row['Close'] >= price_row['MA5']:
+            if max(drop_1w, drop_2w) < (limit_1w * 1.5):
+                return False, 0 
         
-        # 調整欄位順序
-        cols = ['Stock', 'Name', 'Close', 'Score', 'Trigger', 'Tier', 
-                'Chip_Diff_1W', 'Chip_Diff_2W', 'MarketCap(E)', 'MA20', 'Vol_ThisW', 'Vol_LastW']
-        # 確保欄位存在
-        df_out = df_out[[c for c in cols if c in df_out.columns]]
+        is_sell = False
+        max_drop = max(drop_1w, drop_2w)
+        
+        if drop_1w >= limit_1w or drop_2w >= limit_2w:
+            is_sell = True
+            
+        return is_sell, max_drop
 
-        # 存檔
-        df_out.to_csv(RESULT_FILE, index=False, encoding='utf-8-sig')
+# ==========================================
+# 4. 分析與輸出 (保留 test.py 統計功能)
+# ==========================================
+def analyze_results(df, engine):
+    df = df.set_index('Date')
+    df.to_csv(os.path.join(CONFIG['DATA_DIR'], 'daily_equity.csv'))
+    
+    trade_df = pd.DataFrame(engine.trade_records)
+    if not trade_df.empty:
+        trade_df['Return_Pct_Str'] = (trade_df['Return_Pct'] * 100).map('{:,.2f}%'.format)
         
-        print(f"\n{Fore.GREEN}{'='*100}")
-        print(f"🎯 掃描完成！共發現 {len(df_out)} 檔標的")
-        print(f"策略邏輯: Price>MA20 & Vol>5000 & VolMom>1.2 & TieredChip")
-        print(f"檔案已儲存至: {RESULT_FILE}")
-        print(f"{'='*100}{Style.RESET_ALL}")
+        cols = ['Stock', 'Market_Cap', 'Buy_Date', 'Buy_Price', 'Buy_Reason', 
+                'Sell_Date', 'Sell_Price', 'Sell_Reason', 
+                'Hold_Days', 'Return_Pct', 'Profit_Amt', 'Sell_Signal_Val']
         
-        # 顯示前 30 筆
-        print(df_out.head(30).to_string(index=False))
+        valid_cols = [c for c in cols if c in trade_df.columns]
+        trade_df = trade_df[valid_cols]
         
-    else:
-        print(f"\n{Fore.YELLOW}🐢 本週無符合條件標的。")
+        trade_df.to_csv(os.path.join(CONFIG['DATA_DIR'], 'trade_details.csv'), index=False, encoding='utf-8-sig')
+    
+    total_ret = (df['Equity'].iloc[-1] / CONFIG['INITIAL_CAPITAL']) - 1
+    
+    df['Strat_Ret'] = df['Equity'].pct_change().fillna(0)
+    df['Bench_Ret'] = df['Benchmark'].pct_change().fillna(0)
+    
+    cov = np.cov(df['Strat_Ret'], df['Bench_Ret'])
+    beta = cov[0, 1] / np.var(df['Bench_Ret'])
+    
+    days = (df.index[-1] - df.index[0]).days
+    cagr_strat = (df['Equity'].iloc[-1] / CONFIG['INITIAL_CAPITAL']) ** (365/days) - 1
+    cagr_bench = (df['Benchmark'].iloc[-1] / df['Benchmark'].iloc[0]) ** (365/days) - 1
+    
+    alpha = cagr_strat - (0.015 + beta * (cagr_bench - 0.015))
+    sharpe = (cagr_strat - 0.015) / (df['Strat_Ret'].std() * np.sqrt(252))
+    
+    df['Peak'] = df['Equity'].cummax()
+    df['Drawdown'] = (df['Equity'] - df['Peak']) / df['Peak']
+    max_dd = df['Drawdown'].min()
+    
+    print("\n" + "="*50)
+    print(f"🏁 回測結束 V3_Tiered_Strategy")
+    print("="*50)
+    print(f"初始資金: {CONFIG['INITIAL_CAPITAL']:,}")
+    print(f"最終權益: {int(df['Equity'].iloc[-1]):,} (NTD)")
+    print(f"總報酬率: {total_ret*100:.2f}%")
+    print(f"交易筆數: {len(trade_df)} 筆")
+    print("-" * 50)
+    print(f"年化報酬 (CAGR): {cagr_strat*100:.2f}%")
+    print(f"大盤年化 (CAGR): {cagr_bench*100:.2f}%")
+    print(f"Alpha (α):       {alpha*100:.2f}%")
+    print(f"Beta  (β):       {beta:.2f}")
+    print(f"Sharpe Ratio:    {sharpe:.2f}")
+    print(f"Max Drawdown:    {max_dd*100:.2f}%")
+    print("="*50)
 
+    return df, trade_df
+
+def print_stats(engine):
+    print("\n📊 訊號級距統計 (1% 為級距)")
+    print("-" * 50)
+    
+    bins = [0, 1, 2, 3, 4, 5, 100]
+    labels = ['0-1%', '1-2%', '2-3%', '3-4%', '4-5%', '>5%']
+    
+    if engine.buy_stats:
+        print("【買進 - 籌碼週增幅】")
+        res = pd.cut(engine.buy_stats, bins=bins, labels=labels, right=False).value_counts().sort_index()
+        print(res.to_string())
+    
+    print("\n")
+    if engine.sell_stats:
+        print("【賣出 - 籌碼週減幅】")
+        res = pd.cut(engine.sell_stats, bins=bins, labels=labels, right=False).value_counts().sort_index()
+        print(res.to_string())
+    print("="*50)
+
+def plot_performance(df):
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [3, 1]})
+    
+    ax1.plot(df.index, df['Equity'], color='#d62728', linewidth=2, label='策略權益')
+    
+    ax1b = ax1.twinx()
+    ax1b.plot(df.index, df['Benchmark'], color='blue', linestyle='--', alpha=0.4, label='大盤指數')
+    
+    # 標記熔斷區間
+    freezing = df[df['Is_Freezing'] == 1]
+    if not freezing.empty:
+        ax1.fill_between(df.index, df['Equity'].min(), df['Equity'].max(), 
+                         where=df['Is_Freezing']==1, color='gray', alpha=0.2, label='熔斷保護期')
+    
+    ax1.set_title(f"V3 Tiered Strategy vs 大盤", fontsize=14, fontweight='bold')
+    ax1.set_ylabel("資產總值 (NTD)", fontsize=12)
+    ax1b.set_ylabel("加權指數", fontsize=12, rotation=270, labelpad=15)
+    
+    lines, labels = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax1b.get_legend_handles_labels()
+    ax1.legend(lines + lines2, labels + labels2, loc='upper left')
+    ax1.grid(True, alpha=0.3)
+    
+    ax2.fill_between(df.index, df['Drawdown']*100, 0, color='green', alpha=0.3)
+    ax2.set_ylabel("回撤幅度 (%)", fontsize=12)
+    ax2.set_title("策略回撤風險", fontsize=12)
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+
+# ==========================================
+# 5. 主程式
+# ==========================================
 if __name__ == "__main__":
-    main()
+    dh = DataHandler()
+    try:
+        dh.load_data()
+        
+        if not dh.price_data:
+            print("錯誤: 無資料載入")
+        else:
+            engine = BacktestEngine(dh)
+            res_df = engine.run()
+            
+            if not res_df.empty:
+                res_df, trade_df = analyze_results(res_df, engine)
+                print_stats(engine)
+                plot_performance(res_df)
+            else:
+                print("無回測結果產生")
+                
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
