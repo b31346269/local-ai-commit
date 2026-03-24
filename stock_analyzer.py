@@ -18,7 +18,7 @@ plt.rcParams['axes.unicode_minus'] = False
 # ==========================================
 CONFIG = {
     # 時間設定 (從 2022/9 開始)
-    'START_DATE': '2015/6/5',
+    'START_DATE': '2017/6/5',
 
     # 資料路徑 (保留 test_strategy_pro 的路徑)
     'DATA_DIR': r'C:\Users\b3134\Desktop\processed_data',
@@ -45,8 +45,8 @@ CONFIG = {
     # --- Tiered Strategy (三級距) ---
     # [Tier 1] < 1500億
     'T1_CAP_LIMIT': 1500,
-    'T1_1W_TH': 3.0,    
-    'T1_2W_TH': 5.0,    
+    'T1_1W_TH': 30.0,    
+    'T1_2W_TH': 50.0,    
     'T1_WEIGHT': 2.0,   
     # [Tier 2] 1500~4000億
     'T2_CAP_LIMIT': 4000,
@@ -55,7 +55,7 @@ CONFIG = {
     'T2_WEIGHT': 1.0,   
     # [Tier 3] > 4000億
     'T3_1W_TH': 0.2,    
-    'T3_2W_TH': 0.5,    
+    'T3_2W_TH': 0.55,    
     'T3_WEIGHT': 1.3    
 }
 
