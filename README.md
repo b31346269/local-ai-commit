@@ -1,6 +1,6 @@
 #  Local AI Commit Generator (本地 AI 自動 Commit 生成器)
 
-這是一個基於 Python 與 Git Hooks 實作的輕量級開發者工具。透過攔截 Git 的提交流程，並串接本地端的 Ollama 語言模型，實現**完全自動化、高隱私且符合規範**的 Git Commit Message 生成。
+這是一個基於 Python 與 Git Hooks 實作的輕量級開發者工具。透過攔截 Git 的提交流程，並串接本地端的 Ollama 語言模型，實現**自動化、且符合規範**的 Git Commit Message 生成。
 
 ## 核心特色 (Features)
 
